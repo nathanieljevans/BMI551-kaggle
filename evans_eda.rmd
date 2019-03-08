@@ -1,0 +1,94 @@
+---
+title: 'BMI551 Kaggle: EDA'
+author: "Nathaniel Evans"
+date: "March 7, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyr)
+library(dplyr) 
+library(ggplot2) 
+
+```
+
+
+
+
+# Data in 
+
+```{r}
+exp.dat <- read.csv2('./data/expression.txt', sep='\t', numerals='warn.loss', colClasses = 'character', as.is=T)
+
+rnd.sub.cnt <- read.csv2('./data/rand_sub_cont.csv', sep=',')
+
+id.map <- read.csv2('./data/scoring_and_test_set_id_mappings.csv', sep=',')
+
+sub.types <- read.csv2('./data/subtypes.txt', sep='\t')
+
+train.dat <- read.csv2('./data/training_set_answers.txt', sep='\t')
+
+dim(exp.dat)
+head(exp.dat)
+rows <- rownames(exp.dat)
+cols <- colnames(exp.dat)
+rownames(exp.dat) <- NULL 
+colnames(exp.dat) <- NULL
+exp.dat <- t(exp.dat)
+colnames(exp.dat) <- rows
+
+# gene expression data
+#exp.dat <- mutate_all(exp.dat, function(x) as.numeric(as.character(x)))
+exp.dat <- cbind(data.frame('cell.line'=cols), exp.dat) 
+
+head(exp.dat)
+
+
+# Example Submission File: randomly chosen 
+dim(rnd.sub.cnt)
+rnd.sub.cnt <- rnd.sub.cnt %>% mutate('sub.cont'=value) %>% select(-value)
+head(rnd.sub.cnt)
+
+# Submission file id order 
+dim(id.map)
+id.map <- id.map %>% mutate(cell.line = cellline) %>% select(-cellline)
+head(id.map)
+
+# cell line subtype s
+sub.types <- sub.types %>% mutate(cell.line = cellline) %>% select(-cellline)
+head(sub.types)
+
+# 
+dim(train.dat)
+train.dat <- cbind(data.frame('cell.line'=rownames(train.dat)), train.dat)
+rownames(train.dat) <- NULL
+head(train.dat)
+
+train.dat <- train.dat %>% merge(sub.types, by='cell.line') #%>% merge(exp.dat, by='cell.line')
+
+head(train.dat)
+```
+
+```{r}
+summary(exp.dat)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
