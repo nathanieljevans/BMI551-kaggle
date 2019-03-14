@@ -1,0 +1,281 @@
+---
+title: "Final Project: BMI 651"
+author: "Gareth Harman"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+
+# Instructions
+
+Your task is to predict whether a breast cancer cell line will respond to treatment with a given drug using the subtype of the tumor and the gene expression data provided.
+
+Note that we are using this data set for instructional purposes only. It is generally too small to be of use in a real study. This data originally had 70 cell lines and 90 drugs, but in order to avoid issues with missing data we have restricted the challenge to those data seen here. One important aspect of this type of challenge is to ascertain whether the data is sufficient to make meaningful inferences.
+
+There are 25 cell lines and 12 drugs in the training set which you will use to train your classification algorithms.
+
+The responses are coded as 0 = cell line doesn't respond to drug, 1 =cell line does respond to drug.
+
+Your submissions can either be binary or contain values between 0 and 1 so that the area under the ROC curve can be computed for different threshold cutoffs between 0 and 1.
+
+Once you have a prediction method you will submit predictions for an additional 14 cell lines when treated with the same 12 drugs.
+
+Your score on 9 of the 14 cell lines will be automatically calculated and displayed on the website. These scores will determine the leader board standings.
+
+Scores on the remaining 5 cell lines (along with the above 9) will be used to determine the final standings when the competition is over.
+
+You are provided with: 1) A tab-delimited text file containing expression values for 18,632 genes in 39 samples, 2) a tab-delimited text file showing the subtype for all 39 samples, 3) a tab-delimited text file showing whether each of the 25 training cell lines are responsive to each of the 12 drugs. 4) a comma-separated (csv) file showing the id mappings for the 168 (14x12) predictions that you will submit to Kaggle. 5) two example submission files with random guesses.
+
+You are free to use any prediction techniques you wish, but you must try at least two different methods. At least one of those methods must also use a meta-algorithm (e.g. boosting or bagging).
+
+All work should be done in R.
+
+All well-commented scripts should be submitted by the due date and we should be able to run your code to produce your final predictions. Note that this means you should document the version of R and any packages that you use.
+
+A write-up of your method and experimental results is also due at the end of the competition. Labeling your submissions with the technique (and maybe some parameters) that you used to generate the predictions (e.g. NN30hidden10epochs) will help you keep track of what you've tried. Kaggle will keep track of the submission time for you.
+
+Response in this context means that the concentration of drug needed to inhibit cell growth by 50% was above the median for all cell lines tested (not just those used above). There is a lot to be said about whether this measure reflects how the drug will work in patients.
+
+Acknowledgements The data used comes from the study below by Dr. Joe Gray, Dr. Laura Heiser and others many of whom are here at OHSU.
+
+Anneleen Daemen et al., “Modeling Precision Treatment of Breast Cancer,” Genome Biology 14, no. 10 (2013): R110, doi:10.1186/gb-2013-14-10-r110.
+
+```{r, include = F, warning=F, results='hide', echo=F}
+
+library(tidyverse) # all the good stuff
+library(readxl) # for reading in xlsx files
+library(janitor) # for clean_names
+library(knitr) # for kable
+library(moderndive) # for getting tables
+library(corrr) # for correlation matrix
+library(skimr) # for skim
+library(GGally) # for ggpairs
+library(broom) # for pulling out model results
+library(dplyr)
+library(ggpubr)
+library(randomForest)
+
+select <- dplyr::select
+```
+
+```{r, results='hide', echo=F, warning=F}
+
+parDir <- '/Users/harmang/Box Sync/_PhD/phd_2018_19/2018_3_Winter/651_BMI_stat_methods/final/'
+exprText <- paste0(parDir, 'expression.txt')
+randSubContFile <- paste0(parDir, 'rand_sub_cont.csv')
+scoringMappingsFile <- paste0(parDir, 'scoring_and_test_set_id_mappings.csv')
+subtypeText <- paste0(parDir, 'subtypes.txt')
+trainingAnsText <- paste0(parDir, 'training_set_answers.txt')
+
+expr <- read_delim(exprText, '\t')
+randSub <- read_csv(randSubContFile)
+scoringMap <- read_csv(scoringMappingsFile)
+subtypes <- read_delim(subtypeText, '\t')
+trainingAns <- read_delim(trainingAnsText, '\t')
+
+```
+
+File descriptions
+
+`expression.txt` - tab-delimited text file with expression values for 18,632 genes for each of the 39 cell lines.
+`subtypes.txt` - tab-delimited text file of subtypes (basal, luminal, claudin-low and normal-like) for each of 39 cell lines
+`training_set_answers.txt` - tab-delimited text file of the correct classification of 0 (non-responsive) or 1 (responsive) for each combination of 25 cell lines and 12 drugs.
+`scoring_and_test_set_id_mappings.csv` - comma-delimited text file of the id used by Kaggle for each of the cell line/drug combinations in the scoring set and test set. The first 108 values are the scoring set (9 cell lines and 12 drugs) and the last 60 are the final test set (5 cell lines 12 drugs). Scores on the final test set will not be shown until the competition is over.
+`rand_sub_cont.csv` - a sample submission file in the correct format with random predictions between 0 and 1. The calculation of the AUROC value summarizes the performance of these guesses at all thresholds between 0 and 1.
+
+```{r}
+
+skim(randSub)
+skim(scoringMap)
+skim(subtypes)
+skim(trainingAns)
+
+```
+
+- Here we are just looking for missing values and too examine what datatypes we are working with
+- No missing noted 
+
+```{r}
+
+exprNames <- expr$`184A1`
+
+exprOnly <- as.data.frame(t(expr %>% select(-`184A1`)))
+names(exprOnly) <- exprNames
+
+rawVect <- c(t(expr %>% select(-`184A1`)))
+```
+
+- Transform and alter the expr data prior to eda 
+
+```{r}
+hist(rawVect, col = rgb(0, 1, 0, .5))
+```
+
+- Plot of raw data, roughly gaussian, or not so far that a transformation would provide great benefit
+
+```{r}
+
+
+data_long <- gather(trainingAns, `CGC-11047`, , factor_key=TRUE)
+
+ggplot(data_long, aes(`CGC-11047`, value, fill = `CGC-11047`)) + 
+  geom_col() + 
+  geom_hline(yintercept = 12.73) + 
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.x = element_blank())
+
+```
+
+- Here we can see the response counts of each drug, `mean` = 12.7
+
+```{r}
+
+ggplot(subtypes, aes(x = subtype, fill = subtype)) + geom_histogram(stat = 'count')
+
+```
+
+- Note that we have luminal comprises the majority of subtypes, as many as the other three classes combined
+- This will impact our options for classification, based on the subtypes of the test class, we might be biased in our availability to classify luminal subtype cell lines.
+
+### How are subtypes created
+
+1) Integration of genome copy number and transcriptional profiles defines 10 subtypes
+2) Mutation status
+3) Methylation pattern
+4) Splice variant pattern
+5) Protein and phosphoprotein expression
+6) microRNA expression and pathway activity
+
+```{r}
+
+lum_lines <- subtypes %>% filter(subtype == 'Luminal')
+lum_lines <- c(lum_lines$cellline)
+
+lum <- gather(trainingAns %>% filter(`CGC-11047` %in%  lum_lines), `CGC-11047`, factor_key=TRUE)
+mean_lum <- sum(lum$value) / length(unique(lum$`CGC-11047`))
+  
+ggplot(lum, aes(`CGC-11047`, value, fill = `CGC-11047`)) + 
+  geom_col() + 
+  geom_hline(yintercept = mean_lum) + 
+  ggtitle('Luminal Only') +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.x = element_blank())
+
+print(paste('Mean Basal:', mean_lum))
+
+```
+
+```{r}
+
+bas_lines <- subtypes %>% filter(subtype == 'Basal')
+bas_lines <- c(bas_lines$cellline)
+
+bas <- gather(trainingAns %>% filter(`CGC-11047` %in%  bas_lines), `CGC-11047`, factor_key=TRUE)
+mean_bas <- sum(bas$value) / length(unique(bas$`CGC-11047`))
+
+ggplot(bas, aes(`CGC-11047`, value, fill = `CGC-11047`)) + 
+  geom_col() + 
+  geom_hline(yintercept = mean_bas) + 
+  ggtitle('Basal Only') +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.x = element_blank())
+
+print(paste('Mean Basal:', mean_bas))
+```
+
+```{r}
+
+claudin_lines <- subtypes %>% filter(subtype == 'Claudin-low')
+claudin_lines <- c(claudin_lines$cellline)
+
+claudin <- gather(trainingAns %>% filter(`CGC-11047` %in%  claudin_lines), `CGC-11047`, factor_key=TRUE)
+mean_claudin <- sum(claudin$value) / length(unique(claudin$`CGC-11047`))
+
+ggplot(claudin, aes(`CGC-11047`, value, fill = `CGC-11047`)) + 
+  geom_col() + 
+  geom_hline(yintercept = mean_claudin) + 
+  ggtitle('Claudin Only') +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.x = element_blank())
+
+print(paste('Mean Claudin:', mean_claudin))
+
+```
+
+```{r}
+
+normal_lines <- subtypes %>% filter(subtype == 'Normal-like')
+normal_lines <- c(normal_lines$cellline)
+
+normal <- gather(trainingAns %>% filter(`CGC-11047` %in%  normal_lines), `CGC-11047`, factor_key=TRUE)
+mean_normal <- sum(normal$value) / length(unique(normal$`CGC-11047`))
+
+ggplot(normal, aes(`CGC-11047`, value, fill = `CGC-11047`)) + 
+  geom_col() + 
+  geom_hline(yintercept = mean_normal) + 
+  ggtitle('Normal Only') +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks.x = element_blank())
+
+print(paste('Mean Normal:', mean_normal))
+
+```
+
+```{r}
+allVarVar <- c()
+allVar <- c()
+
+for (ii in names(exprOnly)){
+  
+  allVarVar[length(allVarVar) + 1] <- var(exprOnly[ii])
+  allVar[length(allVar) + 1] <- ii
+
+}
+
+varDF <- data.frame(name = allVar, var = allVarVar)
+```
+
+```{r}
+
+varSort <- sort(allVarVar)
+top_250 <- varSort[length(varSort) - 250]
+
+ggplot(varDF, aes(x = var)) + 
+  geom_histogram(stat = 'bin', fill = 'cadetblue3') + 
+  geom_vline(xintercept = top_250) + 
+  ggtitle('Variance of all EXPR values')
+
+varDF_top <- varDF %>% filter(var >= top_250)
+
+ggplot(varDF_top, aes(x = var)) + 
+  geom_histogram(stat = 'bin', fill = 'cadetblue3') + 
+  ggtitle('EXPR of the 250 highest variance')
+
+```
+
+- Here we can see the 250 expression features with the highest variance
+
+```{r}
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
