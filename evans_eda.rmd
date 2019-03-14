@@ -11,6 +11,9 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyr)
 library(dplyr) 
 library(ggplot2) 
+library(moments)
+library(data.table)
+library(Rtsne)
 
 ```
 
@@ -19,8 +22,8 @@ library(ggplot2)
 
 # Data in 
 
-```{r}
-exp.dat <- read.csv2('./data/expression.txt', sep='\t', numerals='warn.loss', colClasses = 'character', as.is=T)
+```{r, message=F, warning=F}
+exp.dat <- read.csv2('./data/expression.txt', header=T, sep='\t', numerals='warn.loss', stringsAsFactors = F)
 
 rnd.sub.cnt <- read.csv2('./data/rand_sub_cont.csv', sep=',')
 
@@ -30,20 +33,20 @@ sub.types <- read.csv2('./data/subtypes.txt', sep='\t')
 
 train.dat <- read.csv2('./data/training_set_answers.txt', sep='\t')
 
-dim(exp.dat)
-head(exp.dat)
-rows <- rownames(exp.dat)
-cols <- colnames(exp.dat)
-rownames(exp.dat) <- NULL 
+#dim(exp.dat)
+#ead(exp.dat)
+gene.names <- rownames(exp.dat)
+line.names <- colnames(exp.dat)
+rownames(exp.dat) <- NULL
+exp.dat <- mutate_all((exp.dat), function(x) as.numeric(x))
 colnames(exp.dat) <- NULL
-exp.dat <- t(exp.dat)
-colnames(exp.dat) <- rows
-
-# gene expression data
-#exp.dat <- mutate_all(exp.dat, function(x) as.numeric(as.character(x)))
-exp.dat <- cbind(data.frame('cell.line'=cols), exp.dat) 
+exp.dat <- transpose(exp.dat)
+colnames(exp.dat) <- gene.names
+exp.dat <- cbind(data.frame('cell.line'=line.names), exp.dat) 
 
 head(exp.dat)
+
+
 
 
 # Example Submission File: randomly chosen 
@@ -71,24 +74,94 @@ train.dat <- train.dat %>% merge(sub.types, by='cell.line') #%>% merge(exp.dat, 
 head(train.dat)
 ```
 
-```{r}
-summary(exp.dat)
+# EDA 
 
+## Variable Variance 
+
+```{r}
+
+skew <- numeric(length=length(colnames(exp.dat)))
+kurt <- numeric(length=length(colnames(exp.dat)))
+variance <- numeric(length=length(colnames(exp.dat)))
+for (i in 2:length(colnames(exp.dat))) {
+  variance[i] <- var(exp.dat[,i])
+  skew[i] <- skewness(exp.dat[,i])
+  kurt[i] <- kurtosis(exp.dat[,i])
+}
+
+s1 <- data.frame(variance, skew, kurt)
+
+s1 %>% summary()
+
+s1 %>% ggplot(aes(x=variance)) + geom_density()
+s1 %>% ggplot(aes(x=skew)) + geom_density()
+s1 %>% ggplot(aes(x=kurt)) + geom_density()
+
+```
+
+## filter by variance 
+
+```{r}
+exp.hivar <- exp.dat[(s1$variance > 3)]
+```
+
+## pca 
+
+take first 100 pca components 
+```{r}
+exp.pca <- princomp(exp.dat[,-1])
+
+```
+
+## tsne
+
+```{r}
+tsne <- Rtsne(exp.hivar, dims = 2, perplexity=15, verbose=TRUE, max_iter = 500, theta=0.25)
+x1 <- tsne$Y[,1]
+x2 <- tsne$Y[,2]
+t2 <- exp.dat %>% select(cell.line) %>% cbind(x1,x2) %>% merge(sub.types, by='cell.line')
+```
+
+
+```{r}
+t2 %>% ggplot(aes(x=x1, y=x2, color=subtype)) + geom_point()
 ```
 
 
 
+```{r}
+dat.r <- dat[genes.random.select, ]
+d.r <- dist(t(dat.r))
+image(as.matrix(d.r))
+hc.r <- hclust(d.r, method = "complete")
+
+plot(hc.r, labels = cl)
+
+```
+
+# feature selection
+
+### Select top 1000 highest variance genes 
+
+### Apply PLS on top 1000 
+
+### Build model for each drug 
 
 
+# ALternative idea 
+
+### Treat each label type seperately
+- Apply PLS to data within label 
+  - within label variable importance may be different 
+- build model for each label/drug 
+- random forest LOO CV dom
+- iterate by narrowing in on high importance genes? 
 
 
+```{r}
 
 
-
-
-
-
-
+```
 
 
 
