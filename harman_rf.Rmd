@@ -1,0 +1,237 @@
+---
+title: "Final Project: BMI 651"
+author: "Gareth Harman"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+
+
+
+```{r, include = F, warning=F, results='hide', echo=F}
+
+library(tidyverse) # all the good stuff
+library(readxl) # for reading in xlsx files
+library(janitor) # for clean_names
+library(knitr) # for kable
+library(moderndive) # for getting tables
+library(corrr) # for correlation matrix
+library(skimr) # for skim
+library(GGally) # for ggpairs
+library(broom) # for pulling out model results
+library(dplyr)
+library(ggpubr)
+library(randomForest)
+library(onehot)
+
+select <- dplyr::select
+```
+
+# Load Data
+
+```{r}
+
+exp.dat <- read.csv2('./data/expression.txt', header=T, sep='\t', numerals='warn.loss', stringsAsFactors = F)
+rnd.sub.cnt <- read.csv2('./data/rand_sub_cont.csv', sep=',')
+id.map <- read.csv2('./data/scoring_and_test_set_id_mappings.csv', sep=',')
+sub.types <- read.csv2('./data/subtypes.txt', sep='\t')
+train.dat <- read.csv2('./data/training_set_answers.txt', sep='\t')
+
+
+
+gene.names <- rownames(exp.dat)
+line.names <- colnames(exp.dat)
+rownames(exp.dat) <- NULL
+exp.dat <- mutate_all((exp.dat), function(x) as.numeric(x))
+colnames(exp.dat) <- NULL
+exp.dat <- t(exp.dat)
+colnames(exp.dat) <- gene.names
+exp.dat <- cbind(data.frame('cell_line'=line.names), exp.dat)
+
+colnames(exp.dat) <- paste0('x_', colnames(exp.dat))
+colnames(exp.dat) <- gsub('.', '_', colnames(exp.dat), fixed=T)
+colnames(exp.dat) <- gsub('-', '_', colnames(exp.dat), fixed=T)
+```
+
+# Variance feature selection
+
+```{r}
+
+variance_values <- c()
+variance_names <- c()
+
+for (ii in names(exp.dat)){
+  
+  variance_values[length(variance_values) + 1] <- var(exp.dat[ii])
+  variance_names[length(variance_names) + 1] <- ii
+
+}
+
+varDF <- data.frame(name = variance_names, var = variance_values)
+varSort <- sort(variance_values)
+#top_250 <- varSort[length(varSort) - 250]
+
+varDF <- varDF %>% filter(var >= .5)
+var_names <- as.vector(varDF$name)
+
+exp.filt <- select(exp.dat, one_of(var_names), x_cell_line)
+
+```
+
+- Create a new expression dataframe from the 250 features with highest variance
+
+# Create the feature set
+
+```{r}
+
+# Merge training data into one feature data.frame
+
+colnames(train.dat) <- paste0("out_", colnames(train.dat))
+colnames(train.dat) <- gsub('.', '_', colnames(train.dat), fixed = T)
+train.dat$x_cell_line <- rownames(train.dat)
+
+train.full <- merge(exp.filt, train.dat, by = "x_cell_line")
+
+# Create a onehot encoded version of subtype
+sub_type <- sub.types %>%
+  mutate(type_luminal = ifelse(subtype == "Luminal", 1, 0)) %>%
+  mutate(type_basal = ifelse(subtype == "Basal", 1, 0)) %>%
+  mutate(type_claudin = ifelse(subtype == "Claudin-low", 1, 0)) %>%
+  mutate(type_normal = ifelse(subtype == "Normal-like", 1, 0)) %>%
+  select(-subtype) 
+
+# Add to feature set
+colnames(sub_type)[1] <- "x_cell_line"
+
+sub_type <- sub_type %>%
+  filter(x_cell_line %in% train.full$x_cell_line)
+
+train.full <- merge(train.full, sub_type, by = "x_cell_line")
+```
+
+### Fix bad column names
+
+```{r}
+
+colnames(train.full) <- gsub(".", "_", colnames(train.full), fixed = T)
+#colnames(train.full) <- gsub('`', '', colnames(train.full), fixed = T)
+
+```
+
+
+```{r}
+
+name.frame <- data.frame(names = names(train.dat))
+name.frame$names <- gsub('.', '-', name.frame$names, fixed = T)
+
+cvCtrl <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+
+#for (ii in name.frame$names){
+ii = "out_CGC_11047"
+
+if (ii != 'x_cell_line'){
+
+  print(paste('Running:', ii))
+  
+  feat_names <- name.frame #%>% filter(names != ii)
+  feat_names <- as.vector(feat_names$names)
+  
+  fact.val <- ifelse(train.full[ii] == 1, 'responder', 'not')
+  
+  run.df <- select(train.full, -one_of(feat_names))
+  #run.df <- select(train.full, type_basal, type_luminal, type_normal, type_claudin)
+  
+  fact.val <- as.factor(ifelse(train.full[ii] == 1, 'responder', 'not'))
+
+  run.df$y <- fact.val #train.full[[ii]]
+  
+  # rf.mod = train(y ~ ., 
+  #                data = run.df, trControl = cvCtrl,
+  #                ntree = 1000, 
+  #                method = "rf", 
+  #                #classProbs = TRUE,
+  #                metric = "Accuracy")
+  
+  mtry.val <- round(sqrt(length(names(run.df))))
+  
+  rf_classifier = randomForest(data = run.df,
+                               y ~ ., 
+                               ntree = 1000,  
+                               mtry=mtry.val, 
+                               importance=TRUE)
+}
+```
+
+```{r}
+
+Xtrain <- run.df %>% select(-y)
+Ytrain <- train.full[[ii]]
+
+tuneRF(Xtrain, Ytrain, mtryStart = 3, 1000, stepFactor = 10, improve = .001, trace = T, plot=T)
+
+```
+
+## Issues
+
+- Is the model declaration working with this for loop
+- Is there 
+
+```{r}
+
+rf.feat <- data.frame(name = rownames(rf_classifier$importance),
+                      imp = rf_classifier$importance[, 3])
+
+
+varImpPlot(rf_classifier, scale=FALSE, n.max = 15)
+
+imp.sort <- sort(rf.feat$imp)
+
+n.rf.feat <- length(imp.sort)-round(length(names(Xtrain))/10)
+rf.feat %>% filter(imp > imp.sort[n.rf.feat])
+
+```
+
+```{r}
+
+Xtrain <- run.df %>% select(-y)
+Ytrain <- train.full[[ii]]
+
+pls.mod <- pls.lda(Xtrain, Ytrain, ncomp = 4, nruncv=5)
+
+acc <- 1 - sum(abs((c(pls.mod$predclass)-1) - Ytrain))/length(Ytrain)
+
+```
+
+
+```{r}
+
+lambda.grid <- seq(0, 100)
+alpha.grid <- seq(0, 0.5, length = 6)
+
+trnCtrl = trainControl(
+             method = "repeatedCV",
+             number = 5,
+             repeats = 3)
+
+srchGrd = expand.grid(.alpha = alpha.grid, .lambda = lambda.grid)
+
+my.train <- train(x = data.matrix(Xtrain),
+                  y = Ytrain,
+                  method = "glmnet",
+                  tuneGrid = srchGrd,
+                  trControl = trnCtrl,
+                  standardize = FALSE,
+                  maxit = 1000000)
+
+```
+
+```{r}
+plot(my.train)
+
+```
+
+
+
+
