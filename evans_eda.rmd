@@ -17,9 +17,6 @@ library(Rtsne)
 
 ```
 
-
-
-
 # Data in 
 
 ```{r, message=F, warning=F}
@@ -33,8 +30,6 @@ sub.types <- read.csv2('./data/subtypes.txt', sep='\t')
 
 train.dat <- read.csv2('./data/training_set_answers.txt', sep='\t')
 
-#dim(exp.dat)
-#ead(exp.dat)
 gene.names <- rownames(exp.dat)
 line.names <- colnames(exp.dat)
 rownames(exp.dat) <- NULL
@@ -44,30 +39,17 @@ exp.dat <- transpose(exp.dat)
 colnames(exp.dat) <- gene.names
 exp.dat <- cbind(data.frame('cell.line'=line.names), exp.dat) 
 
-head(exp.dat)
-
-
-
-
 # Example Submission File: randomly chosen 
-dim(rnd.sub.cnt)
 rnd.sub.cnt <- rnd.sub.cnt %>% mutate('sub.cont'=value) %>% select(-value)
-head(rnd.sub.cnt)
 
 # Submission file id order 
-dim(id.map)
 id.map <- id.map %>% mutate(cell.line = cellline) %>% select(-cellline)
-head(id.map)
 
 # cell line subtype s
 sub.types <- sub.types %>% mutate(cell.line = cellline) %>% select(-cellline)
-head(sub.types)
 
-# 
-dim(train.dat)
 train.dat <- cbind(data.frame('cell.line'=rownames(train.dat)), train.dat)
 rownames(train.dat) <- NULL
-head(train.dat)
 
 train.dat <- train.dat %>% merge(sub.types, by='cell.line') #%>% merge(exp.dat, by='cell.line')
 
