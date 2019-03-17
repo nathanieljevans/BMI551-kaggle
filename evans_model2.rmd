@@ -1,0 +1,300 @@
+---
+title: 'Model # 2'
+author: "Nathaniel Evans"
+date: "March 15, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse) # all the good stuff
+library(readxl) # for reading in xlsx files
+library(janitor) # for clean_names
+library(knitr) # for kable
+library(moderndive) # for getting tables
+library(corrr) # for correlation matrix
+library(skimr) # for skim
+library(GGally) # for ggpairs
+library(broom) # for pulling out model results
+library(dplyr)
+library(ggpubr)
+library(randomForest)
+
+select <- dplyr::select
+
+
+library(tidyr)
+library(dplyr) 
+library(ggplot2) 
+library(moments)
+library(Rtsne)
+
+library(e1071)
+```
+
+
+
+```{r}
+
+load('./data/train.rdat')
+load('./data/exp.rdat')
+load('./data/idmap.rdat')
+
+cell.line <- as.character(exp.dat$cell.line)
+exp.dat <- exp.dat[-1]
+gene.names <- colnames(exp.dat)
+feat.names <- character(length= length(gene.names))
+for (i in 1:length(gene.names)) { 
+    feat.names[i] <- paste('x', i, sep='')
+}
+
+colnames(exp.dat) <- feat.names
+feat.map <- cbind(gene.names, feat.names)
+
+train.dat <- train.dat %>% mutate(cell.line = as.character(cell.line))
+train.dat$cell.line[1] <- 'X184A1'
+
+head(feat.map)
+head(exp.dat[,1:5])
+head(train.dat)
+
+```
+
+# variance filter
+
+Plot variance and look for elbow. Purpose is to remove genes that are displaying normal variance, ie, no expected seperation due to subtype differences. 
+
+```{r}
+
+skew <- numeric(length=length(colnames(exp.dat)))
+kurt <- numeric(length=length(colnames(exp.dat)))
+variance <- numeric(length=length(colnames(exp.dat)))
+for (i in 2:length(colnames(exp.dat))) {
+  variance[i] <- var(exp.dat[,i])
+  skew[i] <- skewness(exp.dat[,i])
+  kurt[i] <- kurtosis(exp.dat[,i])
+}
+
+s1 <- data.frame(variance, skew, kurt)
+
+s1 %>% summary()
+s1 <- s1 %>% filter (variance <3)
+s1 %>% ggplot(aes(x=variance)) + geom_density() + geom_vline(xintercept = 0.35, color='red')
+
+hivar.exp <- exp.dat[(s1$variance > 0.35)]
+
+```
+
+
+# PCA down to 10 variables 
+
+```{r}
+test <- hivar.exp[1:5, 1:5]
+
+t(test)
+```
+
+
+```{r}
+trans.hivar.exp <- t(hivar.exp)
+
+colnames(trans.hivar.exp) <- cell.line
+
+pca <- prcomp( ~ . , data=data.frame(trans.hivar.exp), center=T, scale=T, rank=10)
+
+plot(pca)
+
+pca.exp <- pca$rotation
+```
+
+# manually observe pc variation
+
+```{r}
+#head(train.dat)
+
+drug <- train.dat %>% select(cell.line, CGC.11047)
+pca.exp2 <- data.frame(pca.exp) %>% mutate(cell.line = cell.line)
+pca.exp3 <- pca.exp2 %>% merge(drug, by='cell.line') %>% mutate(CGC.11047 = as.factor(CGC.11047))
+
+pca.exp3 %>% head()
+
+pca.exp3 %>% ggplot(aes(x=PC1, y=PC2, color=CGC.11047)) + geom_point()
+pca.exp3 %>% ggplot(aes(x=PC2, y=PC3, color=CGC.11047)) + geom_point()
+pca.exp3 %>% ggplot(aes(x=PC3, y=PC4, color=CGC.11047)) + geom_point()
+pca.exp3 %>% ggplot(aes(x=PC4, y=PC5, color=CGC.11047)) + geom_point()
+pca.exp3 %>% ggplot(aes(x=PC5, y=PC6, color=CGC.11047)) + geom_point()
+pca.exp3 %>% ggplot(aes(x=PC6, y=PC7, color=CGC.11047)) + geom_point()
+pca.exp3 %>% ggplot(aes(x=PC7, y=PC8, color=CGC.11047)) + geom_point()
+pca.exp3 %>% ggplot(aes(x=PC8, y=PC9, color=CGC.11047)) + geom_point()
+pca.exp3 %>% ggplot(aes(x=PC9, y=PC10, color=CGC.11047)) + geom_point()
+
+
+```
+
+```{r}
+kern = 'radial'
+
+dat <- pca.exp3 %>% mutate( y = CGC.11047 )  %>% select(-CGC.11047, -cell.line)
+
+# cross = NUM_PARTITIONS not k-fold
+tc <- tune.control(random = T, nrepeat = 3, repeat.aggregate = mean,
+sampling = 'cross', sampling.aggregate = mean,
+sampling.dispersion = sd,
+cross = 25, best.model = T,
+performances = TRUE, error.fun = NULL)
+
+
+params <- tune(method = svm, train.x = y ~ ., data = dat, ranges =
+list(cost = seq(0.001,10,1), gamma=2^(-2:1)), kernel = 'radial', tunecontrol = tc)
+
+plot(params)
+
+params
+```
+
+
+```{r}
+
+# inputs: 
+  # feats - 10 PC features (+cell.line) and 39 obs
+  # train - cell.line, drug and 25 obs
+# outputs
+  # predictions - cell.line, prediction [0,1] and 16 obs 
+
+svm.model.predictor <- function(feats, train, kernel) { 
+  drug.name <- colnames(train)[2]
+  colnames(train) <- c('cell.line', 'y')
+  train <- train %>% mutate(y = as.factor(y))
+  tr.dat <- merge(train,feats, by='cell.line')
+  tr.lines <- tr.dat$cell.line
+  tr.dat <- tr.dat %>% select(-cell.line)
+  
+  # CV - cross = # partitions, so 25 -> LOOCV (NOT ONE!)
+  tc <- tune.control(random = T, nrepeat = 3, repeat.aggregate = mean,
+  sampling = 'cross', sampling.aggregate = mean,
+  sampling.dispersion = sd,
+  cross = 25, best.model = T,
+  performances = TRUE, error.fun = NULL)
+  
+  params <- tune(method = svm, train.x = y ~ ., data = tr.dat, ranges =
+  list(cost = seq(0.001,10,1), gamma=2^(-5:1)), kernel = kernel, tunecontrol = tc)
+  
+  svm.model <- params$best.model
+  
+  train.preds <- data.frame(predictions = as.numeric(as.character(predict(svm.model, (tr.dat %>% select(-y)) ))))
+  train.acc <- sum(as.numeric(as.character(tr.dat$y)) == train.preds) / 25
+  print(paste(drug.name, ' training acc: ', train.acc, '  LOOCV acc : ', (1-params$best.performance)))
+  
+  test.dat <- feats %>% filter( !(cell.line %in% tr.lines) ) 
+  tst.lines <- test.dat$cell.line
+  test.dat <- test.dat %>% select(-cell.line)
+  
+  preds <- data.frame(predictions = as.numeric(as.character(predict(svm.model, test.dat))))
+  
+  line.preds <- cbind(data.frame(cell.line = tst.lines), preds)
+  
+  return(line.preds)
+}
+
+
+```
+
+# Build drug models  
+
+```{r}
+
+#drug <- train.dat %>% select(cell.line, CGC.11047)
+#pca.exp2 <- data.frame(pca.exp) %>% mutate(cell.line = cell.line$cell.line)
+#pca.exp3 <- pca.exp2 %>% merge(drug, by='cell.line') %>% mutate(CGC.11047 = as.factor(CGC.11047))
+
+train.dat2 <- train.dat %>% select(-subtype)
+
+for (i in 1:12) { 
+  drg <- colnames(train.dat2)[(i+1)]
+  train1 <- train.dat %>% select(cell.line, drg) 
+  
+  prds <- svm.model.predictor(feats=pca.exp2, train = train1, kernel='linear') %>% mutate(drug = drg)
+  
+  if (i == 1) { 
+    all.prds <- prds  
+  } else { 
+    all.prds <- rbind(all.prds, prds)  
+  }
+
+}
+```
+
+HIVAR > 3.5, pca10, svm-linear-LOOCV
+[1] "CGC.11047  training acc:  0.8   LOOCV acc :  0.52"
+[1] "Carboplatin  training acc:  0.96   LOOCV acc :  0.64"
+[1] "Cisplatin  training acc:  1   LOOCV acc :  0.96"
+[1] "GSK1070916  training acc:  0.68   LOOCV acc :  0.68"
+[1] "GSK1120212  training acc:  1   LOOCV acc :  0.84"
+[1] "GSK461364  training acc:  0.96   LOOCV acc :  0.76"
+[1] "Geldanamycin  training acc:  0.88   LOOCV acc :  0.56"
+[1] "Oxaliplatin  training acc:  1   LOOCV acc :  0.88"
+[1] "PF.3084014  training acc:  1   LOOCV acc :  0.68"
+[1] "PF.3814735  training acc:  0.88   LOOCV acc :  0.68"
+[1] "PF.4691502  training acc:  0.96   LOOCV acc :  0.68"
+[1] "Paclitaxel  training acc:  0.6   LOOCV acc :  0.6"
+
+HIVAR > 3.5, pca10, svm-radial-LOOCV
+[1] "CGC.11047  training acc:  1   LOOCV acc :  0.6"
+[1] "Carboplatin  training acc:  0.96   LOOCV acc :  0.68"
+[1] "Cisplatin  training acc:  1   LOOCV acc :  0.96"
+[1] "GSK1070916  training acc:  0.68   LOOCV acc :  0.68"
+[1] "GSK1120212  training acc:  0.96   LOOCV acc :  0.92"
+[1] "GSK461364  training acc:  0.96   LOOCV acc :  0.92"
+[1] "Geldanamycin  training acc:  1   LOOCV acc :  0.6"
+[1] "Oxaliplatin  training acc:  1   LOOCV acc :  0.84"
+[1] "PF.3084014  training acc:  0.56   LOOCV acc :  0.56"
+[1] "PF.3814735  training acc:  0.92   LOOCV acc :  0.68"
+[1] "PF.4691502  training acc:  0.96   LOOCV acc :  0.72"
+[1] "Paclitaxel  training acc:  0.6   LOOCV acc :  0.6"
+
+# Generate submission file 
+
+```{r}
+
+temp <- as.character(id.map$cell.line)
+for (i in 1:168) { 
+  if (temp[i] %in% '600MPE') { 
+    temp[i] <- 'X600MPE'  
+  }
+}
+id.map$cell.line <- temp
+
+temp <- as.character(id.map$drug)
+for (i in 1:168) { 
+  if (temp[i] %in% 'CGC-11047') { 
+    temp[i] <- 'CGC.11047'  
+  } 
+  if (temp[i] %in% "PF-3084014") {
+    temp[i] <- 'PF.3084014'
+  } 
+  if (temp[i] %in% "PF-3814735") {
+    temp[i] <- "PF.3814735"
+  } 
+  if (temp[i] %in% "PF-4691502") {
+    temp[i] <- "PF.4691502"
+  } 
+}
+id.map$drug <- temp
+
+all.prds$cell.line <- as.character(all.prds$cell.line)
+
+# setdiff(x,)
+
+sub.dat <- merge(id.map, all.prds, by=c('drug', 'cell.line')) %>% mutate(value = predictions) %>% select(id, value) %>% arrange(id)
+
+write.table(sub.dat, file='./evans_submission.csv', sep=',', row.names = F)
+```
+
+
+
+
+
+
+
+

@@ -8,16 +8,40 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
+library(tidyverse) # all the good stuff
+library(readxl) # for reading in xlsx files
+library(janitor) # for clean_names
+library(knitr) # for kable
+library(moderndive) # for getting tables
+library(corrr) # for correlation matrix
+library(skimr) # for skim
+library(GGally) # for ggpairs
+library(broom) # for pulling out model results
+library(dplyr)
+library(ggpubr)
+library(randomForest)
+
+select <- dplyr::select
+
+
 library(tidyr)
 library(dplyr) 
 library(ggplot2) 
 library(moments)
-library(data.table)
 library(Rtsne)
+
 
 ```
 
 # Data in 
+
+File descriptions
+
+`expression.txt` - tab-delimited text file with expression values for 18,632 genes for each of the 39 cell lines.
+`subtypes.txt` - tab-delimited text file of subtypes (basal, luminal, claudin-low and normal-like) for each of 39 cell lines
+`training_set_answers.txt` - tab-delimited text file of the correct classification of 0 (non-responsive) or 1 (responsive) for each combination of 25 cell lines and 12 drugs.
+`scoring_and_test_set_id_mappings.csv` - comma-delimited text file of the id used by Kaggle for each of the cell line/drug combinations in the scoring set and test set. The first 108 values are the scoring set (9 cell lines and 12 drugs) and the last 60 are the final test set (5 cell lines 12 drugs). Scores on the final test set will not be shown until the competition is over.
+`rand_sub_cont.csv` - a sample submission file in the correct format with random predictions between 0 and 1. The calculation of the AUROC value summarizes the performance of these guesses at all thresholds between 0 and 1.
 
 ```{r, message=F, warning=F}
 exp.dat <- read.csv2('./data/expression.txt', header=T, sep='\t', numerals='warn.loss', stringsAsFactors = F)
@@ -35,9 +59,13 @@ line.names <- colnames(exp.dat)
 rownames(exp.dat) <- NULL
 exp.dat <- mutate_all((exp.dat), function(x) as.numeric(x))
 colnames(exp.dat) <- NULL
-exp.dat <- transpose(exp.dat)
+exp.dat <- t(exp.dat)
 colnames(exp.dat) <- gene.names
 exp.dat <- cbind(data.frame('cell.line'=line.names), exp.dat) 
+
+#if (exp.dat$cell.line == train.dat$cell.line) { 
+#  print ('there is a mismatch')  
+#}
 
 # Example Submission File: randomly chosen 
 rnd.sub.cnt <- rnd.sub.cnt %>% mutate('sub.cont'=value) %>% select(-value)
@@ -54,9 +82,20 @@ rownames(train.dat) <- NULL
 train.dat <- train.dat %>% merge(sub.types, by='cell.line') #%>% merge(exp.dat, by='cell.line')
 
 head(train.dat)
+
+save(train.dat, file='./data/train.rdat')
+save(exp.dat, file='./data/exp.rdat')
+save(id.map, file='./data/idmap.rdat')
 ```
 
 # EDA 
+
+## skim 
+
+```{r}
+skim(train.dat)
+skim()
+```
 
 ## Variable Variance 
 
@@ -74,52 +113,47 @@ for (i in 2:length(colnames(exp.dat))) {
 s1 <- data.frame(variance, skew, kurt)
 
 s1 %>% summary()
-
+s1 <- s1 %>% filter (variance <3)
 s1 %>% ggplot(aes(x=variance)) + geom_density()
 s1 %>% ggplot(aes(x=skew)) + geom_density()
 s1 %>% ggplot(aes(x=kurt)) + geom_density()
 
 ```
 
-## filter by variance 
+## tsne clustering 
+
+To look at how the data clusters, I first filtered by variance then used tsne to embed in 2d space. The results show significant seperation by subtype. 
 
 ```{r}
+# filter by variance 
 exp.hivar <- exp.dat[(s1$variance > 3)]
-```
 
-## pca 
-
-take first 100 pca components 
-```{r}
-exp.pca <- princomp(exp.dat[,-1])
-
-```
-
-## tsne
-
-```{r}
-tsne <- Rtsne(exp.hivar, dims = 2, perplexity=15, verbose=TRUE, max_iter = 500, theta=0.25)
+#tsne
+tsne <- Rtsne(exp.hivar, dims = 2, perplexity=12, verbose=TRUE, max_iter = 1000, theta=0.25)
 x1 <- tsne$Y[,1]
 x2 <- tsne$Y[,2]
 t2 <- exp.dat %>% select(cell.line) %>% cbind(x1,x2) %>% merge(sub.types, by='cell.line')
-```
 
-
-```{r}
+#plot 
 t2 %>% ggplot(aes(x=x1, y=x2, color=subtype)) + geom_point()
 ```
 
 
+# heat map
+
+Compare drug sensitivities 
 
 ```{r}
-dat.r <- dat[genes.random.select, ]
-d.r <- dist(t(dat.r))
-image(as.matrix(d.r))
-hc.r <- hclust(d.r, method = "complete")
 
-plot(hc.r, labels = cl)
+heatmap(as.matrix(exp.hivar[,-1]))
+
 
 ```
+
+
+
+
+
 
 # feature selection
 
@@ -142,7 +176,10 @@ plot(hc.r, labels = cl)
 
 ```{r}
 
+temp <- merge(exp.dat, train.dat, by='cell.line')
+dim(temp)
 
+t2 <- temp[!(temp$cell.line %in% train.dat$cell.line)]
 ```
 
 
