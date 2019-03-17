@@ -17,14 +17,10 @@ library(readxl) # for reading in xlsx files
 library(janitor) # for clean_names
 library(knitr) # for kable
 library(moderndive) # for getting tables
-library(corrr) # for correlation matrix
 library(skimr) # for skim
-library(GGally) # for ggpairs
 library(broom) # for pulling out model results
 library(dplyr)
-library(ggpubr)
 library(randomForest)
-library(onehot)
 
 select <- dplyr::select
 ```
@@ -39,8 +35,6 @@ id.map <- read.csv2('./data/scoring_and_test_set_id_mappings.csv', sep=',')
 sub.types <- read.csv2('./data/subtypes.txt', sep='\t')
 train.dat <- read.csv2('./data/training_set_answers.txt', sep='\t')
 
-
-
 gene.names <- rownames(exp.dat)
 line.names <- colnames(exp.dat)
 rownames(exp.dat) <- NULL
@@ -50,48 +44,48 @@ exp.dat <- t(exp.dat)
 colnames(exp.dat) <- gene.names
 exp.dat <- cbind(data.frame('cell_line'=line.names), exp.dat)
 
+# FIX BAD COLUMN NAMES!!!
 colnames(exp.dat) <- paste0('x_', colnames(exp.dat))
 colnames(exp.dat) <- gsub('.', '_', colnames(exp.dat), fixed=T)
 colnames(exp.dat) <- gsub('-', '_', colnames(exp.dat), fixed=T)
 ```
 
-# Variance feature selection
+# Variance feature selection (required for RF)
 
 ```{r}
 
+# Add feature name and variance value
 variance_values <- c()
 variance_names <- c()
 
 for (ii in names(exp.dat)){
-  
   variance_values[length(variance_values) + 1] <- var(exp.dat[ii])
   variance_names[length(variance_names) + 1] <- ii
-
 }
 
+# Create a dataframe of variance
 varDF <- data.frame(name = variance_names, var = variance_values)
 varSort <- sort(variance_values)
-#top_250 <- varSort[length(varSort) - 250]
 
+# Return only above .5 (~3732 features)
 varDF <- varDF %>% filter(var >= .5)
 var_names <- as.vector(varDF$name)
 
+# Create a new dataframe from these filtered values
 exp.filt <- select(exp.dat, one_of(var_names), x_cell_line)
 
 ```
-
-- Create a new expression dataframe from the 250 features with highest variance
 
 # Create the feature set
 
 ```{r}
 
-# Merge training data into one feature data.frame
-
+# Edit features of the response names
 colnames(train.dat) <- paste0("out_", colnames(train.dat))
 colnames(train.dat) <- gsub('.', '_', colnames(train.dat), fixed = T)
 train.dat$x_cell_line <- rownames(train.dat)
 
+# Merge training data into one feature data.frame
 train.full <- merge(exp.filt, train.dat, by = "x_cell_line")
 
 # Create a onehot encoded version of subtype
@@ -102,68 +96,110 @@ sub_type <- sub.types %>%
   mutate(type_normal = ifelse(subtype == "Normal-like", 1, 0)) %>%
   select(-subtype) 
 
-# Add to feature set
+# Add cell_line to feature set
 colnames(sub_type)[1] <- "x_cell_line"
 
+# Get subtype only of those in the training data
 sub_type <- sub_type %>%
   filter(x_cell_line %in% train.full$x_cell_line)
 
+# Add the subtype to training data
 train.full <- merge(train.full, sub_type, by = "x_cell_line")
-```
 
-### Fix bad column names
-
-```{r}
-
+# Fix some column name issues
 colnames(train.full) <- gsub(".", "_", colnames(train.full), fixed = T)
-#colnames(train.full) <- gsub('`', '', colnames(train.full), fixed = T)
 
 ```
 
+# Run the RF
 
 ```{r}
 
+# Create list of response drug names 
 name.frame <- data.frame(names = names(train.dat))
 name.frame$names <- gsub('.', '-', name.frame$names, fixed = T)
 
-cvCtrl <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+# Create the training data without response data
+run.df <- select(train.full, -one_of(as.vector(name.frame$names)))
 
-#for (ii in name.frame$names){
-ii = "out_CGC_11047"
+# Set mtry as sqrt(p) 
+mtry.val <- round(sqrt(length(names(run.df))))
 
-if (ii != 'x_cell_line'){
+# Vector of outcome names to keep adding to the run.df
+resp.names <- name.frame$names[-length(name.frame$names)] # All but celline
+
+# Tuning parameter (hasnt been helping)
+#cvCtrl <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+
+```
+
+```{r}
+
+for (ii in resp.names){ 
 
   print(paste('Running:', ii))
   
-  feat_names <- name.frame #%>% filter(names != ii)
-  feat_names <- as.vector(feat_names$names)
-  
-  fact.val <- ifelse(train.full[ii] == 1, 'responder', 'not')
-  
-  run.df <- select(train.full, -one_of(feat_names))
-  #run.df <- select(train.full, type_basal, type_luminal, type_normal, type_claudin)
-  
+  # Append the current outcome 
   fact.val <- as.factor(ifelse(train.full[ii] == 1, 'responder', 'not'))
-
-  run.df$y <- fact.val #train.full[[ii]]
+  run.df$y <- fact.val 
   
-  # rf.mod = train(y ~ ., 
-  #                data = run.df, trControl = cvCtrl,
-  #                ntree = 1000, 
-  #                method = "rf", 
-  #                #classProbs = TRUE,
-  #                metric = "Accuracy")
-  
-  mtry.val <- round(sqrt(length(names(run.df))))
-  
-  rf_classifier = randomForest(data = run.df,
+  # Run the RF on all features
+  rf.all = randomForest(data = run.df,
                                y ~ ., 
-                               ntree = 1000,  
+                               ntree = 2500,  
                                mtry=mtry.val, 
-                               importance=TRUE)
+                               importance=TRUE
+                               #maxnodes = 10
+                               )
+  
+  # Get accuracy from the model on the TRAINING DATA
+  acc <- sum(rf.all$predicted == run.df$y)/length(run.df$y)
+  print(paste('Raw Accuracy', acc))
+  
+  
+  #############################################
+  #RF FEATURE SELECTION
+  #############################################
+  
+  # Dataframe of variable and importance
+  rf.feat <- data.frame(name = rownames(rf.all$importance),
+                        imp = rf.all$importance[, 3])
+  
+  # Sort by variable importance
+  imp.sort <- sort(rf.feat$imp)
+  
+  n.rf.feat <- 10 # Number of features to grab
+  
+  # Return only the top 10 features 
+  rf.feat <- rf.feat %>% filter(imp > imp.sort[length(imp.sort) - n.rf.feat])  
+  rf.feat.names <- as.vector(rf.feat$name)
+  
+  # Create the new dataframe with subtype, response, and top 10 features 
+  refine.df <- run.df %>% select(y, type_basal, type_luminal, type_normal, type_claudin,
+                                 one_of(rf.feat.names))
+  
+  # Need an updated mtry.val
+  mtry.val.refine <- round(sqrt(length(names(refine.df))))
+
+  # Rerun the RF
+  rf.refine= randomForest(data = refine.df,
+                             y ~ ., 
+                             ntree = 2500,  
+                             mtry=mtry.val.refine, 
+                             importance=TRUE
+                             #maxnodes = 10
+                             )
+  
+  # Recompute accuracy
+  acc <- sum(rf.refine$predicted == run.df$y)/length(run.df$y)
+  print(paste('Refined Accuracy', acc))
+ 
+  # Remove current treatment 
+  run.df <- run.df %>% select(-y)
 }
 ```
 
+# RF tuning (not necessary)
 ```{r}
 
 Xtrain <- run.df %>% select(-y)
@@ -173,38 +209,19 @@ tuneRF(Xtrain, Ytrain, mtryStart = 3, 1000, stepFactor = 10, improve = .001, tra
 
 ```
 
-## Issues
-
-- Is the model declaration working with this for loop
-- Is there 
-
-```{r}
-
-rf.feat <- data.frame(name = rownames(rf_classifier$importance),
-                      imp = rf_classifier$importance[, 3])
-
-
-varImpPlot(rf_classifier, scale=FALSE, n.max = 15)
-
-imp.sort <- sort(rf.feat$imp)
-
-n.rf.feat <- length(imp.sort)-round(length(names(Xtrain))/10)
-rf.feat %>% filter(imp > imp.sort[n.rf.feat])
-
-```
-
+# PLS-LDA not great ~ 70% ACC
 ```{r}
 
 Xtrain <- run.df %>% select(-y)
 Ytrain <- train.full[[ii]]
 
-pls.mod <- pls.lda(Xtrain, Ytrain, ncomp = 4, nruncv=5)
+pls.mod <- pls.lda(Xtrain, Ytrain, ncomp = 4, nruncv=20)
 
 acc <- 1 - sum(abs((c(pls.mod$predclass)-1) - Ytrain))/length(Ytrain)
 
 ```
 
-
+# Elastic-net horrible
 ```{r}
 
 lambda.grid <- seq(0, 100)
@@ -225,13 +242,29 @@ my.train <- train(x = data.matrix(Xtrain),
                   standardize = FALSE,
                   maxit = 1000000)
 
-```
-
-```{r}
 plot(my.train)
 
 ```
 
+# Lasso horrible
+```{r}
 
+x <- model.matrix(y~.,run.df)[,-1]
+y <- ifelse(run.df$y == 'responder', 0, 1)
 
+cv <- cv.glmnet(x, y, alpha = 1)
+cv$lambda.min
+
+model <- glmnet(x, y, alpha = 1, lambda = cv$lambda.min)
+coef(model)
+
+x.test <- model.matrix(y~.,run.df)[,-1]
+predictions <- model %>% predict(x.test) %>% as.vector()
+
+# Model performance metrics
+data.frame(
+  RMSE = RMSE(predictions, y),
+  Rsquare = R2(predictions, y)
+)
+```
 
