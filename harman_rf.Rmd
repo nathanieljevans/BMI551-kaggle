@@ -100,14 +100,31 @@ sub_type <- sub.types %>%
 colnames(sub_type)[1] <- "x_cell_line"
 
 # Get subtype only of those in the training data
-sub_type <- sub_type %>%
+sub_type_train <- sub_type %>%
   filter(x_cell_line %in% train.full$x_cell_line)
 
 # Add the subtype to training data
-train.full <- merge(train.full, sub_type, by = "x_cell_line")
+train.full <- merge(train.full, sub_type_train, by = "x_cell_line")
 
 # Fix some column name issues
 colnames(train.full) <- gsub(".", "_", colnames(train.full), fixed = T)
+
+```
+
+# Setup test data
+
+```{r}
+
+# Get subtype only of those in the training data
+sub_type_test <- sub_type %>%
+  filter(!x_cell_line %in% train.full$x_cell_line)
+
+# Fix the stupid cell line naming issue
+sub_type_test$x_cell_line <- as.vector(sub_type_test$x_cell_line)
+sub_type_test[1, 1] = 'X600MPE'
+
+# Create test data
+test.full.inc <- merge(exp.filt, sub_type_test, by = "x_cell_line")
 
 ```
 
@@ -128,12 +145,20 @@ mtry.val <- round(sqrt(length(names(run.df))))
 # Vector of outcome names to keep adding to the run.df
 resp.names <- name.frame$names[-length(name.frame$names)] # All but celline
 
-# Tuning parameter (hasnt been helping)
-#cvCtrl <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
-
 ```
 
 ```{r}
+
+# Setup dataframe for final output
+final.pred.raw <- data.frame(cell_line = test.full.inc$x_cell_line)
+final.pred.refine <- data.frame(cell_line = test.full.inc$x_cell_line)
+
+# Test data sans cellline
+test.full <- test.full.inc %>% select(-x_cell_line)
+
+# Update overall accuracy
+update.raw <- c()
+update.ref <- c()
 
 for (ii in resp.names){ 
 
@@ -146,16 +171,21 @@ for (ii in resp.names){
   # Run the RF on all features
   rf.all = randomForest(data = run.df,
                                y ~ ., 
-                               ntree = 2500,  
+                               ntree = 5000,  
                                mtry=mtry.val, 
-                               importance=TRUE
-                               #maxnodes = 10
+                               importance=TRUE,
+                               maxnodes = 10
                                )
   
   # Get accuracy from the model on the TRAINING DATA
   acc <- sum(rf.all$predicted == run.df$y)/length(run.df$y)
   print(paste('Raw Accuracy', acc))
+  update.raw[length(update.raw)+1] <- acc
   
+  # Predicted raw
+  pred.run.raw <- predict(rf.all, test.full)
+  pred.val.raw <- ifelse(pred.run.raw == 'responder', 1, 0)
+  final.pred.raw[ii] <- pred.val.raw
   
   #############################################
   #RF FEATURE SELECTION
@@ -168,7 +198,7 @@ for (ii in resp.names){
   # Sort by variable importance
   imp.sort <- sort(rf.feat$imp)
   
-  n.rf.feat <- 10 # Number of features to grab
+  n.rf.feat <- 100 # Number of features to grab
   
   # Return only the top 10 features 
   rf.feat <- rf.feat %>% filter(imp > imp.sort[length(imp.sort) - n.rf.feat])  
@@ -193,11 +223,69 @@ for (ii in resp.names){
   # Recompute accuracy
   acc <- sum(rf.refine$predicted == run.df$y)/length(run.df$y)
   print(paste('Refined Accuracy', acc))
- 
+  update.ref[length(update.ref)+1] <- acc
+
+  # Add to prediction data.frame
+  pred.run.refine <- predict(rf.refine, test.full)
+  pred.val.refine <- ifelse(pred.run.refine == 'responder', 1, 0)
+  final.pred.refine[ii] <- pred.val.refine
+  
   # Remove current treatment 
   run.df <- run.df %>% select(-y)
 }
+
+print(paste('Mean Raw:', mean(update.raw)))
+print(paste('Mean Ref:', mean(update.ref)))
 ```
+
+### Last specs
+- RF Filt: 5 
+- Tree: 2500
+- Var Filter: >= .5
+- Mean RAW: .64
+- Mean REF: .90
+
+# Format
+
+```{r}
+
+id.cellline <- as.character(id.map$cellline)
+
+for (i in 1:168) { 
+  if (id.cellline[i] %in% '600MPE') { 
+    id.cellline[i] <- 'X600MPE'  
+  }
+}
+
+id.drug <- as.character(paste0('out_', id.map$drug))
+id.drug <- gsub('-', '_', id.drug, fixed=T)
+
+final.write.raw <- c()
+final.write.ref <- c()
+
+for (ii in 1:168) {
+  
+  cell.ind.raw <- which(final.pred.raw$cell_line == id.cellline[ii])
+  cell.ind.ref <- which(final.pred.refine$cell_line == id.cellline[ii])
+  
+  temp.raw.vect <- final.pred.raw[id.drug[ii]]
+  temp.ref.vect <- final.pred.refine[id.drug[ii]]
+  
+  final.write.raw[length(final.write.raw)+1] <- temp.raw.vect[cell.ind.raw, 1]
+  final.write.ref[length(final.write.ref)+1] <- temp.ref.vect[cell.ind.ref, 1]
+  
+}
+
+df.final.raw <- data.frame(id = seq(1, 168), value = final.write.raw)
+df.final.ref <- data.frame(id = seq(1, 168), value = final.write.ref)
+
+write.table(df.final.raw, file='./harman_rf_raw.csv', sep=',', row.names = F)
+write.table(df.final.ref, file='./harman_rf_ref.csv', sep=',', row.names = F)
+```
+
+```
+
+
 
 # RF tuning (not necessary)
 ```{r}
